@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 from langchain.agents.middleware import TodoListMiddleware
 from langchain.chat_models import init_chat_model
 
+from research_deepagent.middleware import ResearchBudgetMiddleware
 from research_deepagent.prompts import (
     RESEARCH_WORKFLOW_INSTRUCTIONS,
     RESEARCHER_INSTRUCTIONS,
@@ -107,6 +108,37 @@ if _stream_chunk_timeout_env not in (None, ""):
 MAX_CONCURRENT_RESEARCH_UNITS = 3
 MAX_RESEARCHER_ITERATIONS = 3
 
+# Root run name in LangSmith. Keep it aligned with the graph id in
+# langgraph.json so the tutorial's "research" trace is easy to find.
+GRAPH_NAME = "research"
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    """Read a positive int from the environment, falling back on the default."""
+    raw = _nonempty_env(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        warnings.warn(
+            f"Ignoring invalid {name}={raw!r}; using {default} instead.",
+            stacklevel=2,
+        )
+        return default
+    if value <= 0:
+        warnings.warn(
+            f"Ignoring non-positive {name}={raw!r}; using {default} instead.",
+            stacklevel=2,
+        )
+        return default
+    return value
+
+
+# Model-turn budgets: the main orchestrator gets more room than one researcher.
+MAIN_MODEL_BUDGET = _positive_int_env("RESEARCH_MAX_MODEL_CALLS", 24)
+SUBAGENT_MODEL_BUDGET = _positive_int_env("RESEARCH_MAX_SUBAGENT_MODEL_CALLS", 12)
+
 current_date = datetime.now().strftime("%Y-%m-%d")
 
 INSTRUCTIONS = (
@@ -128,6 +160,9 @@ research_sub_agent = {
     ),
     "system_prompt": RESEARCHER_INSTRUCTIONS.format(date=current_date),
     "tools": [tavily_search, think_tool],
+    # Sub-agents get their own middleware stack and state, so the budget guard
+    # has to be attached here explicitly instead of being inherited.
+    "middleware": [ResearchBudgetMiddleware(SUBAGENT_MODEL_BUDGET)],
 }
 
 MODEL_INIT_KWARGS: dict[str, object] = {
@@ -158,11 +193,18 @@ elif MODEL_PROVIDER == "google_genai":
 
 model = init_chat_model(**MODEL_INIT_KWARGS)
 
-def build_graph(chat_model, *, checkpointer=None):
-    """Use the same planning configuration in the app and SDK verification."""
+def build_graph(chat_model, *, checkpointer=None, middleware=None):
+    """Use the same planning configuration in the app and SDK verification.
+
+    ``middleware`` is injectable so tests can swap in smaller budgets; the
+    default is the course default: planning plus the research budget guard.
+    """
+    if middleware is None:
+        middleware = [TodoListMiddleware(), ResearchBudgetMiddleware(MAIN_MODEL_BUDGET)]
     return create_deep_agent(
         model=chat_model,
-        middleware=[TodoListMiddleware()],
+        middleware=middleware,
+        name=GRAPH_NAME,
         tools=[tavily_search, think_tool],
         system_prompt=INSTRUCTIONS,
         subagents=[research_sub_agent],
