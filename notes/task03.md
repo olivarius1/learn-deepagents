@@ -71,3 +71,18 @@ backend = FilesystemBackend(
 
 ### UDF
 实现相关协议即可
+
+## how
+
+LLM: read_file(path="/notes/a.txt", offset=1, limit=2)
+  ↓
+FilesystemMiddleware
+  ├─ validate_path()              路径合法性        ← 中间件
+  ├─ _check_fs_permission()       权限              ← 中间件
+  ├─ backend.read(...)            切出第 2~3 行      ← backend
+  ├─ 空内容分支 / 视频分支 / base64 分支             ← 中间件
+  ├─ format_content_with_line_numbers()  加 "  2→"  ← 中间件
+  ├─ _truncate_paginated_read()   超 token 截断     ← 中间件
+  └─ + "（还有 7 行未读，可继续 offset=3）"         ← 中间件
+  ↓
+LLM 看到带行号、带续读提示、尺寸可控的文本
